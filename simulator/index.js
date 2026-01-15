@@ -1,4 +1,5 @@
 import http from "node:http";
+import OpenAI from "openai";
 
 const PORT = Number(process.env.THERMO_PORT) || 8081;
 const TICK_MS = 1000;
@@ -7,12 +8,19 @@ const HEAT_RATE = 0.12;
 const COOL_RATE = 0.12;
 const DRY_RATE = 0.3;
 const LEAK_RATE = 0.01;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const ELECTRICITY_CACHE_TTL_MS = 10 * 60 * 1000;
+const ELECTRICITY_TIMEOUT_MS = 12000;
 
 const MODES = new Set(["Ogrevanje", "Hlajenje", "Izklop", "Razvlazevanje"]);
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const roundOne = (value) => Math.round(value * 10) / 10;
 const roundTwo = (value) => Math.round(value * 100) / 100;
+
+const electricityCache = new Map();
+const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
 const state = {
   setpoint: 22,
@@ -43,6 +51,88 @@ const logHvacState = () => {
       state.outsideTemp
     )}, duty=${formatDuty(state.duty)})`
   );
+};
+
+const getCachedElectricity = (country) => {
+  const cached = electricityCache.get(country);
+  if (!cached) return null;
+  if (cached.expiresAt < Date.now()) {
+    electricityCache.delete(country);
+    return null;
+  }
+  return cached.data;
+};
+
+const setCachedElectricity = (country, data) => {
+  electricityCache.set(country, {
+    data,
+    expiresAt: Date.now() + ELECTRICITY_CACHE_TTL_MS,
+  });
+};
+
+const toMinutes = (value) => {
+  if (typeof value !== "string") return 0;
+  const [hours, minutes] = value.split(":").map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return 0;
+  return hours * 60 + minutes;
+};
+
+const toPriceNumber = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeElectricityPricing = (input, fallbackCountry) => {
+  if (!input || typeof input !== "object") return null;
+  const data = input;
+  const prices = Array.isArray(data.prices)
+    ? data.prices
+        .map((slot) => {
+          if (!slot || typeof slot !== "object") return null;
+          const from = typeof slot.from === "string" ? slot.from : "";
+          const to = typeof slot.to === "string" ? slot.to : "";
+          const price = toPriceNumber(slot.price);
+          if (!from || !to || price === null) return null;
+          return { from, to, price };
+        })
+        .filter(Boolean)
+    : [];
+
+  if (!prices.length) return null;
+
+  prices.sort((a, b) => toMinutes(a.from) - toMinutes(b.from));
+
+  return {
+    country: typeof data.country === "string" ? data.country : fallbackCountry,
+    currency: typeof data.currency === "string" ? data.currency : "EUR",
+    unit: typeof data.unit === "string" ? data.unit : "kWh",
+    timezone:
+      typeof data.timezone === "string" ? data.timezone : "Europe/Ljubljana",
+    prices,
+    note: typeof data.note === "string" ? data.note : "",
+  };
+};
+
+const buildElectricityPrompt = (country) => ({
+  model: OPENAI_MODEL,
+  temperature: 0.2,
+  response_format: { type: "json_object" },
+  input: `Return JSON only. Use ASCII. Provide a realistic time-of-use electricity price schedule for ${country}. If time-of-use is uncommon, return a single full-day rate. Use this JSON schema exactly: {"country":"","currency":"","unit":"kWh","timezone":"","prices":[{"from":"HH:MM","to":"HH:MM","price":0.0}],"note":""}. Use 24h time and decimal dots. Keep 4-6 price slots.`,
+});
+
+const getResponseText = (response) => {
+  if (!response || typeof response !== "object") return "";
+  if (typeof response.output_text === "string") return response.output_text;
+  const output = Array.isArray(response.output) ? response.output : [];
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    if (!Array.isArray(item.content)) continue;
+    const textPart = item.content.find(
+      (part) => part && part.type === "output_text" && typeof part.text === "string"
+    );
+    if (textPart?.text) return textPart.text;
+  }
+  return "";
 };
 
 const computeHvacState = () => {
@@ -173,6 +263,58 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && url.pathname === "/state") {
     sendJson(res, 200, state);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/electricity") {
+    const country = url.searchParams.get("country")?.trim() || "Slovenija";
+    const cached = getCachedElectricity(country);
+    if (cached) {
+      sendJson(res, 200, cached);
+      return;
+    }
+
+    if (!OPENAI_API_KEY || !openai) {
+      sendJson(res, 400, { error: "OPENAI_API_KEY ni nastavljen." });
+      return;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), ELECTRICITY_TIMEOUT_MS);
+      let response;
+      try {
+        response = await openai.responses.create(
+          buildElectricityPrompt(country),
+          { signal: controller.signal }
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      const content = getResponseText(response);
+      if (!content) {
+        throw new Error("Missing OpenAI content");
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        throw new Error("Invalid OpenAI JSON");
+      }
+
+      const normalized = normalizeElectricityPricing(parsed, country);
+      if (!normalized) {
+        throw new Error("Invalid electricity pricing format");
+      }
+
+      setCachedElectricity(country, normalized);
+      sendJson(res, 200, normalized);
+    } catch (error) {
+      console.warn("[THERMO] Electricity price fetch failed.", error);
+      sendJson(res, 500, { error: "Neuspesno branje cen elektrike." });
+    }
     return;
   }
 

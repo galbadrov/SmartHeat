@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import ControlPanel from "./components/ControlPanel";
+import ElectricityPanel from "./components/ElectricityPanel";
 import ForecastPanel from "./components/ForecastPanel";
 import Hero from "./components/Hero";
 import SchedulePanel from "./components/SchedulePanel";
@@ -16,6 +17,7 @@ import type {
   ForecastDay,
   HvacState,
   Mode,
+  ElectricityPricing,
   ThermostatState,
   WeatherNow,
 } from "./types";
@@ -23,6 +25,8 @@ import type {
 const MODES: Mode[] = ["Ogrevanje", "Hlajenje", "Izklop", "Razvlazevanje"];
 const SIMULATOR_URL =
   import.meta.env.VITE_THERMO_URL || "http://localhost:8081";
+const OPENAI_KEY = import.meta.env.VITE_OPENAI_API_KEY || "";
+const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-4o-mini";
 const HVAC_LABELS: Record<HvacState, Mode> = {
   HEATING: "Ogrevanje",
   COOLING: "Hlajenje",
@@ -122,6 +126,89 @@ const DEMO_WEATHER: WeatherNow = {
   city: "Ljubljana",
 };
 
+const COUNTRIES = [
+  { code: "SI", label: "Slovenija" },
+  { code: "AT", label: "Avstrija" },
+  { code: "DE", label: "Nemcija" },
+  { code: "IT", label: "Italija" },
+  { code: "HR", label: "Hrvaska" },
+];
+
+const DEFAULT_COUNTRY = "SI";
+
+const DEMO_ELECTRICITY: Record<string, ElectricityPricing> = {
+  SI: {
+    country: "Slovenija",
+    currency: "EUR",
+    unit: "kWh",
+    timezone: "Europe/Ljubljana",
+    prices: [
+      { from: "00:00", to: "06:00", price: 0.11 },
+      { from: "06:00", to: "10:00", price: 0.22 },
+      { from: "10:00", to: "16:00", price: 0.18 },
+      { from: "16:00", to: "22:00", price: 0.25 },
+      { from: "22:00", to: "24:00", price: 0.14 },
+    ],
+    note: "Demo ocena. Dejanske tarife so odvisne od ponudnika.",
+  },
+  AT: {
+    country: "Avstrija",
+    currency: "EUR",
+    unit: "kWh",
+    timezone: "Europe/Vienna",
+    prices: [
+      { from: "00:00", to: "06:00", price: 0.1 },
+      { from: "06:00", to: "09:00", price: 0.21 },
+      { from: "09:00", to: "17:00", price: 0.17 },
+      { from: "17:00", to: "22:00", price: 0.24 },
+      { from: "22:00", to: "24:00", price: 0.13 },
+    ],
+    note: "Demo ocena. Dejanske tarife so odvisne od ponudnika.",
+  },
+  DE: {
+    country: "Nemcija",
+    currency: "EUR",
+    unit: "kWh",
+    timezone: "Europe/Berlin",
+    prices: [
+      { from: "00:00", to: "06:00", price: 0.12 },
+      { from: "06:00", to: "09:00", price: 0.26 },
+      { from: "09:00", to: "17:00", price: 0.2 },
+      { from: "17:00", to: "22:00", price: 0.28 },
+      { from: "22:00", to: "24:00", price: 0.15 },
+    ],
+    note: "Demo ocena. Dejanske tarife so odvisne od ponudnika.",
+  },
+  IT: {
+    country: "Italija",
+    currency: "EUR",
+    unit: "kWh",
+    timezone: "Europe/Rome",
+    prices: [
+      { from: "00:00", to: "07:00", price: 0.13 },
+      { from: "07:00", to: "10:00", price: 0.27 },
+      { from: "10:00", to: "18:00", price: 0.21 },
+      { from: "18:00", to: "22:00", price: 0.29 },
+      { from: "22:00", to: "24:00", price: 0.16 },
+    ],
+    note: "Demo ocena. Dejanske tarife so odvisne od ponudnika.",
+  },
+  HR: {
+    country: "Hrvaska",
+    currency: "EUR",
+    unit: "kWh",
+    timezone: "Europe/Zagreb",
+    prices: [
+      { from: "00:00", to: "06:00", price: 0.09 },
+      { from: "06:00", to: "10:00", price: 0.2 },
+      { from: "10:00", to: "16:00", price: 0.16 },
+      { from: "16:00", to: "22:00", price: 0.23 },
+      { from: "22:00", to: "24:00", price: 0.12 },
+    ],
+    note: "Demo ocena. Dejanske tarife so odvisne od ponudnika.",
+  },
+};
+
 const DAY_NAMES = [
   "Nedelja",
   "Ponedeljek",
@@ -154,6 +241,72 @@ const getMinutes = (time: string) => {
   const [hours, minutes] = time.split(":").map(Number);
   if (Number.isNaN(hours) || Number.isNaN(minutes)) return 0;
   return hours * 60 + minutes;
+};
+
+const toPriceNumber = (value: unknown) => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeElectricityPricing = (
+  input: unknown,
+  fallback: ElectricityPricing
+): ElectricityPricing | null => {
+  if (!input || typeof input !== "object") return null;
+  const data = input as Partial<ElectricityPricing>;
+  const prices = Array.isArray(data.prices)
+    ? data.prices
+        .map((slot) => {
+          if (!slot || typeof slot !== "object") return null;
+          const raw = slot as { from?: unknown; to?: unknown; price?: unknown };
+          const from = typeof raw.from === "string" ? raw.from : "";
+          const to = typeof raw.to === "string" ? raw.to : "";
+          const price = toPriceNumber(raw.price);
+          if (!from || !to || price === null) return null;
+          return { from, to, price };
+        })
+        .filter((slot): slot is { from: string; to: string; price: number } =>
+          Boolean(slot)
+        )
+    : [];
+
+  if (!prices.length) return null;
+
+  const sortedPrices = [...prices].sort(
+    (a, b) => getMinutes(a.from) - getMinutes(b.from)
+  );
+
+  return {
+    country: typeof data.country === "string" ? data.country : fallback.country,
+    currency:
+      typeof data.currency === "string" ? data.currency : fallback.currency,
+    unit: typeof data.unit === "string" ? data.unit : fallback.unit,
+    timezone:
+      typeof data.timezone === "string" ? data.timezone : fallback.timezone,
+    prices: sortedPrices,
+    note: typeof data.note === "string" ? data.note : fallback.note,
+  };
+};
+
+const extractResponseText = (payload: unknown) => {
+  if (!payload || typeof payload !== "object") return "";
+  const data = payload as { output_text?: unknown; output?: unknown };
+  if (typeof data.output_text === "string") return data.output_text;
+  if (!Array.isArray(data.output)) return "";
+  for (const item of data.output) {
+    if (!item || typeof item !== "object") continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    const textPart = content.find(
+      (part) =>
+        part &&
+        typeof part === "object" &&
+        (part as { type?: unknown }).type === "output_text" &&
+        typeof (part as { text?: unknown }).text === "string"
+    ) as { text?: string } | undefined;
+    if (textPart?.text) return textPart.text;
+  }
+  return "";
 };
 
 const getScheduleState = (awayTime: string, returnTime: string, now: Date) => {
@@ -285,6 +438,19 @@ function App() {
   const [usingDemo, setUsingDemo] = useState(!apiKey);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [refreshIndex, setRefreshIndex] = useState(0);
+
+  const [selectedCountry, setSelectedCountry] =
+    useState<string>(DEFAULT_COUNTRY);
+  const [electricityPricing, setElectricityPricing] =
+    useState<ElectricityPricing>(DEMO_ELECTRICITY[DEFAULT_COUNTRY]);
+  const [electricityStatus, setElectricityStatus] = useState<
+    "idle" | "loading" | "success" | "error"
+  >("idle");
+  const [electricityError, setElectricityError] = useState("");
+  const [electricityUsingDemo, setElectricityUsingDemo] = useState(!OPENAI_KEY);
+  const [electricityUpdated, setElectricityUpdated] = useState<string | null>(
+    null
+  );
 
   const [thermoState, setThermoState] =
     useState<ThermostatState>(DEFAULT_THERMO_STATE);
@@ -536,6 +702,101 @@ function App() {
   }, [apiKey, city, refreshIndex]);
 
   useEffect(() => {
+    const selected =
+      COUNTRIES.find((item) => item.code === selectedCountry) ?? COUNTRIES[0];
+    if (!selected) return;
+
+    const fallback =
+      DEMO_ELECTRICITY[selected.code] ?? DEMO_ELECTRICITY[DEFAULT_COUNTRY];
+
+    if (!OPENAI_KEY) {
+      setElectricityPricing(fallback);
+      setElectricityUsingDemo(true);
+      setElectricityStatus("error");
+      setElectricityUpdated(null);
+      setElectricityError("VITE_OPENAI_API_KEY ni nastavljen.");
+      return;
+    }
+
+    const controller = new AbortController();
+    const fetchElectricity = async () => {
+      setElectricityStatus("loading");
+      setElectricityError("");
+      setElectricityUsingDemo(false);
+
+      try {
+        const response = await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_KEY}`,
+          },
+          body: JSON.stringify({
+            model: OPENAI_MODEL,
+            text: { format: { type: "json_object" } },
+            input: `Return JSON only. Use ASCII. Provide a realistic time-of-use electricity price schedule for ${selected.label}. If time-of-use is uncommon, return a single full-day rate. Use this JSON schema exactly: {"country":"","currency":"","unit":"kWh","timezone":"","prices":[{"from":"HH:MM","to":"HH:MM","price":0.0}],"note":""}. Use 24h time and decimal dots. Keep 4-6 price slots.`,
+          }),
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          let message = "Neuspesno branje cen elektrike.";
+          try {
+            const errorPayload = (await response.json()) as {
+              error?: { message?: string };
+              message?: string;
+            };
+            message =
+              errorPayload?.error?.message || errorPayload?.message || message;
+          } catch {
+            // Ignore JSON parse failures.
+          }
+          throw new Error(message);
+        }
+
+        const data = (await response.json()) as unknown;
+        const content = extractResponseText(data);
+        if (!content) {
+          throw new Error("Neuspesno branje cen elektrike.");
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(content);
+        } catch {
+          throw new Error("Neuspesno branje cen elektrike.");
+        }
+        const normalized = normalizeElectricityPricing(parsed, fallback);
+        if (!normalized) {
+          throw new Error("Neuspesno branje cen elektrike.");
+        }
+
+        setElectricityPricing(normalized);
+        setElectricityStatus("success");
+        setElectricityUsingDemo(false);
+        setElectricityUpdated(
+          new Date().toLocaleTimeString("en-GB", {
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        );
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setElectricityPricing(fallback);
+        setElectricityUsingDemo(true);
+        setElectricityStatus("error");
+        setElectricityUpdated(null);
+        setElectricityError(
+          error instanceof Error && error.message
+            ? error.message
+            : "Neuspesno branje cen elektrike."
+        );
+      }
+    };
+
+    fetchElectricity();
+    return () => controller.abort();
+  }, [selectedCountry]);
+
+  useEffect(() => {
     let active = true;
     let polling = false;
 
@@ -700,6 +961,17 @@ function App() {
             recommendedMode={recommendedMode}
             nextChange={scheduleState.nextChange}
             isAway={scheduleState.isAway}
+          />
+
+          <ElectricityPanel
+            countries={COUNTRIES}
+            selectedCountry={selectedCountry}
+            onCountryChange={(value) => setSelectedCountry(value)}
+            pricing={electricityPricing}
+            status={electricityStatus}
+            error={electricityError}
+            usingDemo={electricityUsingDemo}
+            lastUpdated={electricityUpdated}
           />
         </section>
       </main>

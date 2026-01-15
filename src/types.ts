@@ -34,3 +34,18 @@ export type ThermostatState = {
   duty: number;
   lastUpdated: string;
 };
+
+export type ElectricityPriceSlot = {
+  from: string;
+  to: string;
+  price: number;
+};
+
+export type ElectricityPricing = {
+  country: string;
+  currency: string;
+  unit: string;
+  timezone: string;
+  prices: ElectricityPriceSlot[];
+  note?: string;
+};
