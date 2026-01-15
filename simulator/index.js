@@ -6,7 +6,7 @@ const HYSTERESIS = 0.4;
 const HEAT_RATE = 0.12;
 const COOL_RATE = 0.12;
 const DRY_RATE = 0.3;
-const LEAK_RATE = 0.02;
+const LEAK_RATE = 0.01;
 
 const MODES = new Set(["Ogrevanje", "Hlajenje", "Izklop", "Razvlazevanje"]);
 
@@ -99,8 +99,7 @@ const tick = () => {
 
   state.currentTemp = roundOne(state.currentTemp + tempChange);
 
-  let humidityChange =
-    (state.outsideHumidity - state.currentHumidity) * 0.01;
+  let humidityChange = (state.outsideHumidity - state.currentHumidity) * 0.01;
   if (state.hvacState === "DRYING") {
     humidityChange -= DRY_RATE;
   } else if (state.hvacState === "HEATING") {

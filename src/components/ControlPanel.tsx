@@ -21,19 +21,27 @@ export default function ControlPanel({
   onTargetHumidityChange,
   onManualModeChange,
 }: ControlPanelProps) {
+  const tagBase =
+    "inline-flex items-center gap-1.5 rounded-full border border-[rgba(31,26,22,0.12)] bg-[rgba(31,26,22,0.08)] px-3 py-1 text-[0.72rem] uppercase tracking-[0.08em] text-[#3f352d]";
+  const modeButtonBase =
+    "rounded-full border border-[rgba(36,34,30,0.16)] px-3.5 py-2 text-[0.9rem] transition";
+  const modeButtonActive = "bg-[#1f1a16] text-[#fff7f1] border-transparent";
+
   return (
-    <div className='panel panel--control'>
-      <div className='panel__header'>
+    <div className='col-span-5 rounded-[24px] bg-white/85 p-6 shadow-soft backdrop-blur-[8px] max-[1024px]:col-span-6'>
+      <div className='flex flex-wrap items-start justify-between gap-4'>
         <div>
-          <h2>Zelje uporabnika</h2>
-          <p>Nastavi cilj, ostalo optimizira sistem.</p>
+          <h2 className='font-display text-[1.3rem]'>Zelje uporabnika</h2>
+          <p className='text-[0.95rem] text-muted'>
+            Nastavi cilj, ostalo optimizira sistem.
+          </p>
         </div>
-        <div className='panel__meta'>
-          <span className='tag'>Cilj {targetTempLabel}</span>
+        <div className='flex flex-wrap items-center gap-2'>
+          <span className={tagBase}>Cilj {targetTempLabel}</span>
         </div>
       </div>
-      <div className='control'>
-        <div className='control__row'>
+      <div className='mt-5 rounded-[18px] border border-[rgba(36,34,30,0.08)] bg-white/60 p-4'>
+        <div className='mb-2.5 flex items-center justify-between text-[0.95rem]'>
           <label htmlFor='temp'>Optimalna temperatura</label>
           <span>{targetTempLabel}</span>
         </div>
@@ -46,10 +54,11 @@ export default function ControlPanel({
           onChange={(event) =>
             onTargetTempChange(Number(event.target.value))
           }
+          className='w-full accent-warm'
         />
       </div>
-      <div className='control'>
-        <div className='control__row'>
+      <div className='mt-5 rounded-[18px] border border-[rgba(36,34,30,0.08)] bg-white/60 p-4'>
+        <div className='mb-2.5 flex items-center justify-between text-[0.95rem]'>
           <label htmlFor='humidity'>Optimalna vlaznost</label>
           <span>{targetHumidity}%</span>
         </div>
@@ -62,24 +71,25 @@ export default function ControlPanel({
           onChange={(event) =>
             onTargetHumidityChange(Number(event.target.value))
           }
+          className='w-full accent-warm'
         />
       </div>
-      <div className='mode'>
-        <p>Nacin delovanja (rocni izbor)</p>
-        <div className='mode__group'>
+      <div className='mt-6'>
+        <p className='mb-3 text-muted'>Nacin delovanja (rocni izbor)</p>
+        <div className='flex flex-wrap gap-2.5'>
           {modes.map((item) => (
             <button
               key={item}
-              className={
-                manualMode === item ? "mode__btn is-active" : "mode__btn"
-              }
+              className={`${modeButtonBase} ${
+                manualMode === item ? modeButtonActive : "bg-transparent"
+              }`}
               onClick={() => onManualModeChange(item)}
             >
               {item}
             </button>
           ))}
         </div>
-        <p className='hint'>
+        <p className='mt-2.5 text-[0.85rem] text-muted'>
           Ce je samodejni eko nacin vklopljen, sistem lahko prilagodi nacin.
         </p>
       </div>

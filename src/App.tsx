@@ -1,11 +1,17 @@
+// Mapa tehnologij:
+// - OpenWeather REST API (weather + forecast): src/App.tsx:480, src/App.tsx:483
+// - Thermostat simulator REST API (state + command): src/App.tsx:549, src/App.tsx:583
+// - Simulator HTTP server endpoints: simulator/index.js:149, simulator/index.js:160, simulator/index.js:165
+
 import { useEffect, useMemo, useRef, useState } from "react";
-import "./App.css";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import ControlPanel from "./components/ControlPanel";
 import ForecastPanel from "./components/ForecastPanel";
 import Hero from "./components/Hero";
 import SchedulePanel from "./components/SchedulePanel";
 import SimulationPanel from "./components/SimulationPanel";
 import Topbar from "./components/Topbar";
+import { firestore, isFirebaseConfigured } from "./lib/firebase";
 import type {
   ForecastDay,
   HvacState,
@@ -23,6 +29,7 @@ const HVAC_LABELS: Record<HvacState, Mode> = {
   DRYING: "Razvlazevanje",
   IDLE: "Izklop",
 };
+const PREHEAT_MINUTES = 30;
 const DEFAULT_THERMO_STATE: ThermostatState = {
   setpoint: 22,
   humiditySetpoint: 45,
@@ -64,6 +71,14 @@ type WeatherApiResponse = {
   sys?: {
     country?: string;
   };
+};
+
+type PersistedSettings = {
+  targetTemp: number;
+  targetHumidity: number;
+  autoEco: boolean;
+  awayTime: string;
+  returnTime: string;
 };
 
 const DEMO_FORECAST: ForecastDay[] = [
@@ -158,6 +173,37 @@ const getScheduleState = (awayTime: string, returnTime: string, now: Date) => {
   return { isAway, nextChange };
 };
 
+const MINUTES_PER_DAY = 24 * 60;
+
+const getMinutesUntilReturn = (
+  awayTime: string,
+  returnTime: string,
+  now: Date
+): number | null => {
+  const awayMinutes = getMinutes(awayTime);
+  const returnMinutes = getMinutes(returnTime);
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+  if (awayMinutes === returnMinutes) return null;
+
+  const crossesMidnight = awayMinutes > returnMinutes;
+
+  if (!crossesMidnight) {
+    if (nowMinutes < awayMinutes || nowMinutes >= returnMinutes) return null;
+    return returnMinutes - nowMinutes;
+  }
+
+  if (nowMinutes >= awayMinutes) {
+    return MINUTES_PER_DAY - nowMinutes + returnMinutes;
+  }
+
+  if (nowMinutes < returnMinutes) {
+    return returnMinutes - nowMinutes;
+  }
+
+  return null;
+};
+
 const pickDailyForecast = (items: ForecastApiItem[]) => {
   const dailyMap = new Map<
     string,
@@ -223,6 +269,7 @@ function App() {
   const [awayTime, setAwayTime] = useState("08:30");
   const [returnTime, setReturnTime] = useState("16:30");
   const [autoEco, setAutoEco] = useState(true);
+  const [settingsReady, setSettingsReady] = useState(!isFirebaseConfigured);
 
   const apiKey = import.meta.env.VITE_OPENWEATHER_API_KEY || "";
   const defaultCity = import.meta.env.VITE_OPENWEATHER_CITY || "Ljubljana,SI";
@@ -245,13 +292,22 @@ function App() {
   >("idle");
   const lastCommandRef = useRef("");
 
-  const scheduleState = getScheduleState(awayTime, returnTime, new Date());
-  const comfortTemp =
-    autoEco && scheduleState.isAway ? Math.max(16, targetTemp - 3) : targetTemp;
-  const comfortHumidity =
-    autoEco && scheduleState.isAway
-      ? Math.max(35, targetHumidity - 4)
-      : targetHumidity;
+  const now = new Date();
+  const toggleAutoEco = () => setAutoEco((prev) => !prev);
+  const scheduleState = getScheduleState(awayTime, returnTime, now);
+  const minutesUntilReturn = getMinutesUntilReturn(
+    awayTime,
+    returnTime,
+    now
+  );
+  const isPreheatWindow =
+    autoEco &&
+    scheduleState.isAway &&
+    minutesUntilReturn !== null &&
+    minutesUntilReturn <= PREHEAT_MINUTES;
+
+  const comfortTemp = targetTemp;
+  const comfortHumidity = targetHumidity;
 
   const outsideTemp =
     weatherNow?.temp ?? forecast[0]?.temp ?? thermoState.outsideTemp ?? 7;
@@ -272,12 +328,13 @@ function App() {
       ? "Napaka pri vremenu"
       : "Sistem povezan";
 
+  const statusDotBase = "h-2.5 w-2.5 rounded-full";
   const statusClass =
     thermoStatus === "error" || !apiKey || weatherStatus === "error"
-      ? "status__dot status__dot--error"
+      ? `${statusDotBase} bg-[#d95a46] shadow-[0_0_0_4px_rgba(217,90,70,0.2)]`
       : weatherStatus === "loading" || thermoStatus === "loading"
-      ? "status__dot status__dot--warn"
-      : "status__dot";
+      ? `${statusDotBase} bg-[#f0b94c] shadow-[0_0_0_4px_rgba(240,185,76,0.2)]`
+      : `${statusDotBase} bg-[#43b17e] shadow-[0_0_0_4px_rgba(67,177,126,0.15)]`;
 
   const forecastHint = useMemo(() => {
     if (!forecast.length) return "Napoved ni na voljo.";
@@ -295,12 +352,14 @@ function App() {
     return "Napoved je stabilna - ohranjamo varcni profil.";
   }, [forecast, targetTemp]);
 
-  const recommendedMode = getRecommendedMode(
+  const baseRecommendedMode = getRecommendedMode(
     thermoState.currentTemp,
     thermoState.currentHumidity,
     comfortTemp,
     comfortHumidity
   );
+  const shouldPauseHvac = autoEco && scheduleState.isAway && !isPreheatWindow;
+  const recommendedMode = shouldPauseHvac ? "Izklop" : baseRecommendedMode;
   const activeMode = autoEco ? recommendedMode : manualMode;
   const hvacStateLabel = HVAC_LABELS[thermoState.hvacState];
   const efficiencyLabel =
@@ -324,6 +383,78 @@ function App() {
   const indoorTempLabel = formatTemp(thermoState.currentTemp);
   const indoorHumidityLabel = thermoState.currentHumidity;
   const powerLabel = powerKw.toFixed(2);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured || !firestore) return;
+
+    const db = firestore;
+    let active = true;
+    const loadSettings = async () => {
+      try {
+        const snapshot = await getDoc(doc(db, "settings", "default"));
+        if (!active) return;
+        if (snapshot.exists()) {
+          const data = snapshot.data() as Partial<PersistedSettings>;
+          if (typeof data.targetTemp === "number") {
+            setTargetTemp(data.targetTemp);
+          }
+          if (typeof data.targetHumidity === "number") {
+            setTargetHumidity(data.targetHumidity);
+          }
+          if (typeof data.autoEco === "boolean") {
+            setAutoEco(data.autoEco);
+          }
+          if (typeof data.awayTime === "string") {
+            setAwayTime(data.awayTime);
+          }
+          if (typeof data.returnTime === "string") {
+            setReturnTime(data.returnTime);
+          }
+        }
+      } catch (error) {
+        console.warn("Firestore settings load failed.", error);
+      } finally {
+        if (active) setSettingsReady(true);
+      }
+    };
+
+    loadSettings();
+    return () => {
+      active = false;
+    };
+  }, [firestore, isFirebaseConfigured]);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured || !firestore || !settingsReady) return;
+
+    const db = firestore;
+    const payload: PersistedSettings = {
+      targetTemp,
+      targetHumidity,
+      autoEco,
+      awayTime,
+      returnTime,
+    };
+
+    const timeout = window.setTimeout(() => {
+      setDoc(doc(db, "settings", "default"), payload, {
+        merge: true,
+      }).catch((error) => {
+        console.warn("Firestore settings save failed.", error);
+      });
+    }, 500);
+
+    return () => window.clearTimeout(timeout);
+  }, [
+    autoEco,
+    awayTime,
+    firestore,
+    isFirebaseConfigured,
+    returnTime,
+    settingsReady,
+    targetHumidity,
+    targetTemp,
+  ]);
 
   useEffect(() => {
     if (!apiKey) {
@@ -499,14 +630,23 @@ function App() {
   }, [apiKey]);
 
   return (
-    <div className='app'>
+    <div className='relative min-h-screen overflow-hidden px-[clamp(20px,5vw,64px)] pt-12 pb-20 max-[720px]:px-[18px] max-[720px]:pt-8 max-[720px]:pb-[60px]'>
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute -left-[120px] -top-[120px] h-[380px] w-[380px] rounded-full bg-[radial-gradient(circle,_rgba(255,200,150,0.7),_transparent_60%)] opacity-60'
+      />
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute -bottom-[160px] -right-[160px] h-[480px] w-[480px] rounded-full bg-[radial-gradient(circle,_rgba(120,190,220,0.7),_transparent_60%)] opacity-60'
+      />
       <Topbar
         autoEco={autoEco}
         statusClass={statusClass}
         statusLabel={statusLabel}
+        onToggleAutoEco={toggleAutoEco}
       />
 
-      <main>
+      <main className='relative z-10 flex flex-col gap-8'>
         <Hero
           savingsPct={savingsPct}
           autoEco={autoEco}
@@ -519,7 +659,7 @@ function App() {
           outsideHumidityLabel={outsideHumidityLabel}
         />
 
-        <section className='grid'>
+        <section className='mt-11 grid grid-cols-12 gap-6 max-[1024px]:grid-cols-6'>
           <ControlPanel
             targetTemp={targetTemp}
             targetTempLabel={targetTempLabel}
@@ -552,7 +692,7 @@ function App() {
             isAway={scheduleState.isAway}
             onAwayTimeChange={(value) => setAwayTime(value)}
             onReturnTimeChange={(value) => setReturnTime(value)}
-            onAutoEcoChange={(value) => setAutoEco(value)}
+            onToggleAutoEco={toggleAutoEco}
           />
 
           <SimulationPanel
