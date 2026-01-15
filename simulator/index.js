@@ -88,14 +88,20 @@ const tick = () => {
 
   state.duty = roundOne(duty);
 
-  let tempChange = (state.outsideTemp - state.currentTemp) * LEAK_RATE;
+  const leak = (state.outsideTemp - state.currentTemp) * LEAK_RATE;
+  const minNetDelta = 0.02;
+  let hvacDelta = 0;
   if (state.hvacState === "HEATING") {
-    tempChange += HEAT_RATE * duty;
+    const baseHeat = HEAT_RATE * duty;
+    hvacDelta = Math.max(baseHeat, Math.abs(leak) + minNetDelta);
   } else if (state.hvacState === "COOLING") {
-    tempChange -= COOL_RATE * duty;
+    const baseCool = COOL_RATE * duty;
+    hvacDelta = -Math.max(baseCool, Math.abs(leak) + minNetDelta);
   } else if (state.hvacState === "DRYING") {
-    tempChange += HEAT_RATE * 0.2;
+    hvacDelta = HEAT_RATE * 0.2;
   }
+
+  const tempChange = leak + hvacDelta;
 
   state.currentTemp = roundOne(state.currentTemp + tempChange);
 
