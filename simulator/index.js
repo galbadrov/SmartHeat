@@ -12,6 +12,7 @@ const MODES = new Set(["Ogrevanje", "Hlajenje", "Izklop", "Razvlazevanje"]);
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const roundOne = (value) => Math.round(value * 10) / 10;
+const roundTwo = (value) => Math.round(value * 100) / 100;
 
 const state = {
   setpoint: 22,
@@ -78,32 +79,39 @@ const tick = () => {
 
   const hvacActive = state.hvacState !== "IDLE";
   let duty = 0;
+  const leak = (state.outsideTemp - state.currentTemp) * LEAK_RATE;
+  const minNetDelta = 0.02;
   if (hvacActive) {
     const diff =
       state.hvacState === "DRYING"
         ? Math.max(0, state.currentHumidity - state.humiditySetpoint)
         : Math.abs(state.setpoint - state.currentTemp);
-    duty = clamp(diff / 2, 0.3, 1);
+    const baseDuty = clamp(diff / 2, 0.3, 1);
+    let minDuty = 0;
+    if (state.hvacState === "HEATING") {
+      const requiredDelta = Math.max(0, minNetDelta - leak);
+      minDuty = requiredDelta / HEAT_RATE;
+    } else if (state.hvacState === "COOLING") {
+      const requiredDelta = Math.max(0, leak + minNetDelta);
+      minDuty = requiredDelta / COOL_RATE;
+    } else if (state.hvacState === "DRYING") {
+      minDuty = baseDuty;
+    }
+    duty = Math.max(baseDuty, minDuty);
   }
 
   state.duty = roundOne(duty);
 
-  const leak = (state.outsideTemp - state.currentTemp) * LEAK_RATE;
-  const minNetDelta = 0.02;
-  let hvacDelta = 0;
+  let tempChange = leak;
   if (state.hvacState === "HEATING") {
-    const baseHeat = HEAT_RATE * duty;
-    hvacDelta = Math.max(baseHeat, Math.abs(leak) + minNetDelta);
+    tempChange += HEAT_RATE * duty;
   } else if (state.hvacState === "COOLING") {
-    const baseCool = COOL_RATE * duty;
-    hvacDelta = -Math.max(baseCool, Math.abs(leak) + minNetDelta);
+    tempChange -= COOL_RATE * duty;
   } else if (state.hvacState === "DRYING") {
-    hvacDelta = HEAT_RATE * 0.2;
+    tempChange += HEAT_RATE * 0.2;
   }
 
-  const tempChange = leak + hvacDelta;
-
-  state.currentTemp = roundOne(state.currentTemp + tempChange);
+  state.currentTemp = roundTwo(state.currentTemp + tempChange);
 
   let humidityChange = (state.outsideHumidity - state.currentHumidity) * 0.01;
   if (state.hvacState === "DRYING") {

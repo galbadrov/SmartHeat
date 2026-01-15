@@ -30,6 +30,7 @@ const HVAC_LABELS: Record<HvacState, Mode> = {
   IDLE: "Izklop",
 };
 const PREHEAT_MINUTES = 30;
+const SETTINGS_DOC_ID = "demo";
 const DEFAULT_THERMO_STATE: ThermostatState = {
   setpoint: 22,
   humiditySetpoint: 45,
@@ -295,11 +296,7 @@ function App() {
   const now = new Date();
   const toggleAutoEco = () => setAutoEco((prev) => !prev);
   const scheduleState = getScheduleState(awayTime, returnTime, now);
-  const minutesUntilReturn = getMinutesUntilReturn(
-    awayTime,
-    returnTime,
-    now
-  );
+  const minutesUntilReturn = getMinutesUntilReturn(awayTime, returnTime, now);
   const isPreheatWindow =
     autoEco &&
     scheduleState.isAway &&
@@ -388,10 +385,11 @@ function App() {
     if (!isFirebaseConfigured || !firestore) return;
 
     const db = firestore;
+    const settingsRef = doc(db, "settings", SETTINGS_DOC_ID);
     let active = true;
     const loadSettings = async () => {
       try {
-        const snapshot = await getDoc(doc(db, "settings", "default"));
+        const snapshot = await getDoc(settingsRef);
         if (!active) return;
         if (snapshot.exists()) {
           const data = snapshot.data() as Partial<PersistedSettings>;
@@ -428,6 +426,7 @@ function App() {
     if (!isFirebaseConfigured || !firestore || !settingsReady) return;
 
     const db = firestore;
+    const settingsRef = doc(db, "settings", SETTINGS_DOC_ID);
     const payload: PersistedSettings = {
       targetTemp,
       targetHumidity,
@@ -437,9 +436,7 @@ function App() {
     };
 
     const timeout = window.setTimeout(() => {
-      setDoc(doc(db, "settings", "default"), payload, {
-        merge: true,
-      }).catch((error) => {
+      setDoc(settingsRef, payload).catch((error) => {
         console.warn("Firestore settings save failed.", error);
       });
     }, 500);
@@ -624,10 +621,6 @@ function App() {
     setCityInput(trimmed);
     setRefreshIndex((prev) => prev + 1);
   };
-
-  useEffect(() => {
-    console.log("doblen key: ", apiKey);
-  }, [apiKey]);
 
   return (
     <div className='relative min-h-screen overflow-hidden px-[clamp(20px,5vw,64px)] pt-12 pb-20 max-[720px]:px-[18px] max-[720px]:pt-8 max-[720px]:pb-[60px]'>
